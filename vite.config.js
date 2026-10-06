@@ -7,4 +7,8 @@ export default defineConfig({
     // In local dev (npm run dev), forward /api calls to the backend
     proxy: { "/api": "http://localhost:5000" },
   },
+  test: {
+    environment: "jsdom",
+    setupFiles: "./src/test-setup.js",
+  },
 });

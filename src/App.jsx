@@ -1,26 +1,33 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 const API = `${import.meta.env.VITE_API_URL || "/api"}/todos`;
+
+async function fetchTodos() {
+  const res = await fetch(API);
+  if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+  return res.json();
+}
 
 export default function App() {
   const [todos, setTodos] = useState([]);
   const [title, setTitle] = useState("");
   const [error, setError] = useState("");
 
-  async function load() {
-    try {
-      const res = await fetch(API);
-      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
-      setTodos(await res.json());
-      setError("");
-    } catch (err) {
-      setError("Could not reach the backend: " + err.message);
-    }
-  }
+  // State is set in the .then callbacks, after the request finishes
+  const load = useCallback(
+    () =>
+      fetchTodos()
+        .then((data) => {
+          setTodos(data);
+          setError("");
+        })
+        .catch((err) => setError("Could not reach the backend: " + err.message)),
+    []
+  );
 
   useEffect(() => {
     load();
-  }, []);
+  }, [load]);
 
   async function addTodo(e) {
     e.preventDefault();
