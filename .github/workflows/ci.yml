@@ -1,14 +1,10 @@
-name: Frontend CI/CD
+name: Frontend CI
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-
-env:
-  AWS_REGION: ap-south-1
-  ECR_REPOSITORY: todo-frontend
 
 jobs:
   test:
@@ -24,36 +20,3 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
-
-  deploy:
-    name: Build, push & deploy
-    needs: test
-    # Only deploy pushes to main, not pull requests
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    concurrency: deploy-frontend
-    permissions:
-      id-token: write # lets GitHub log in to AWS with OIDC
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and push image
-        env:
-          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
-        run: |
-          docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" .
-          docker push --all-tags "$IMAGE"
-
-      - name: Deploy to EC2
-        env:
-          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
-        run: .github/scripts/deploy-ec2.sh frontend
