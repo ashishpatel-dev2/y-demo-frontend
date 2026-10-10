@@ -1,0 +1,94 @@
+name: Frontend CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: todo-frontend
+  ECS_CLUSTER: todo-cluster
+  ECS_SERVICE: todo-frontend-service
+  TASK_DEFINITION: .aws/task-definition.json
+
+jobs:
+  test:
+    name: Lint, test & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  deploy:
+    name: Deploy to ECS
+    needs: test
+    # Only deploy pushes to main, not pull requests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency: deploy-frontend
+    permissions:
+      id-token: write # lets GitHub log in to AWS with OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: image
+        env:
+          REPO: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+        run: |
+          IMAGE="$REPO:${{ github.sha }}"
+          docker build -t "$IMAGE" -t "$REPO:latest" .
+          docker push --all-tags "$REPO"
+          echo "uri=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Register new task definition
+        id: taskdef
+        env:
+          IMAGE: ${{ steps.image.outputs.uri }}
+        run: |
+          # Point the task definition at the image we just pushed
+          jq --arg image "$IMAGE" '.containerDefinitions[0].image = $image' \
+            "$TASK_DEFINITION" > taskdef.json
+          ARN=$(aws ecs register-task-definition --cli-input-json file://taskdef.json \
+            --query taskDefinition.taskDefinitionArn --output text)
+          echo "Registered $ARN"
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to ECS service
+        env:
+          TASK_DEF: ${{ steps.taskdef.outputs.arn }}
+        run: |
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+            --task-definition "$TASK_DEF" --query 'service.serviceName' --output text
+          echo "Waiting for the new tasks to pass the load balancer health check..."
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+
+          # If the new tasks kept failing, ECS rolls back to the previous
+          # version and the service is "stable" again, so check which won.
+          RUNNING=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' --output text)
+          if [ "$RUNNING" != "$TASK_DEF" ]; then
+            echo "::error::Deployment failed and ECS rolled back to $RUNNING. Logs: CloudWatch /ecs/todo-frontend"
+            exit 1
+          fi
+          echo "Deployed $TASK_DEF"
